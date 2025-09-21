@@ -1,139 +1,303 @@
-
+#!/usr/bin/env python3
 """
-Biox Systems — AI QR Code Generator
-Usage (CLI):
-  python biox_qr.py "https://your-url.com" --out qr.png --title "Biox Systems" --subtitle "AI QR Code Generator"
+Biox Systems — AI QR Code Generator (Optimized & Commented)
+-----------------------------------------------------------
+Generates a branded, layout-ready PNG containing:
+  • Optional title (header)
+  • Optional subtitle
+  • High-error-correction QR code (safe for a small center logo)
+  • Optional footer
 
-Options:
-  --out <file>             Output PNG path (default: qr_biox.png)
-  --title <text>           Header/title above the QR (default: "Biox Systems")
-  --subtitle <text>        Subtitle below header (default: "AI QR Code Generator")
-  --footer <text>          Footer at the bottom (default: "Biox Systems • AI QR Code Generator • 1994→2025")
-  --logo <path>            Optional logo PNG with transparent background to place at QR center
-  --dark "#000000"         Dark color for QR (default black)
-  --light "#FFFFFF"        Light color/background for QR (default white)
-  --size 1024              QR box pixel size (default 1024) — final canvas is larger to fit text margins
+Quick start:
+  pip install qrcode pillow
+  python main.py "https://your-url.com" --out qr.png --title "Biox Systems" --subtitle "AI QR Code Generator"
+
+Key optimizations:
+  1) Exact pixel sizing without resizing the QR grid (avoids blur).
+  2) Modern Pillow resampling for non-QR assets (logos).
+  3) Safer color parsing (hex or named colors).
+  4) Clean, centered layout with optional sections and wrapped footer.
 """
+
+from __future__ import annotations
 
 import argparse
-from PIL import Image, ImageDraw, ImageFont
+import os
+from dataclasses import dataclass
+from typing import Optional, Tuple, List
+
+from PIL import Image, ImageDraw, ImageFont, ImageColor
+from PIL.Image import Resampling
+
 import qrcode
 from qrcode.constants import ERROR_CORRECT_H
-import os, textwrap
 
-def load_font(size: int):
-    # Try to load a nice sans font; fall back to default if not available.
-    # DejaVuSans is usually present in many environments.
+
+# ------------------------------
+# Utilities
+# ------------------------------
+
+def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """
+    Best-effort load of a sans or sans-bold font; falls back to default bitmap font.
+    DejaVuSans is commonly available on many systems.
+    """
+    candidates = [
+        ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"),
+        ("Arial Bold.ttf" if bold else "Arial.ttf"),
+        ("Helvetica Bold.ttf" if bold else "Helvetica.ttf"),
+    ]
+    for name in candidates:
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def parse_color(value: str, default_hex: str) -> str:
+    """
+    Validate and normalize a color string. Accepts hex ("#000", "#000000")
+    or named colors ("black"). Returns a safe "#rrggbb" hex string.
+    """
+    if not value:
+        return default_hex
     try:
-        return ImageFont.truetype("DejaVuSans.ttf", size)
-    except:
-        return ImageFont.load_default()
+        r, g, b = ImageColor.getrgb(value)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return default_hex
 
-def make_qr(data: str, box_size: int = 18, border: int = 4, fill_color="#000000", back_color="#FFFFFF"):
+
+@dataclass
+class LayoutConfig:
+    title: str = "Biox Systems"
+    subtitle: str = "AI QR Code Generator"
+    footer: str = "Biox Systems • AI QR Code Generator • 1994→2025"
+    bg_color: str = "#FFFFFF"
+    dark_color: str = "#000000"
+    pad: int = 80                 # outer canvas padding
+    gap_title_sub: int = 8        # gap between title and subtitle
+    gap_sub_qr: int = 24          # gap between subtitle and QR
+    gap_qr_footer: int = 24       # gap between QR and footer
+    max_footer_width_chars: int = 60  # soft wrap width for footer
+
+
+# ------------------------------
+# QR Generation
+# ------------------------------
+
+def compute_box_size(target_px: int, modules: int, border: int) -> int:
+    """
+    Compute `box_size` such that:
+        total_px = (modules + 2*border) * box_size
+    is the largest value <= target_px.
+    Ensures the QR is rasterized at the intended scale (no post-resize).
+    """
+    denom = max(1, (modules + 2 * border))
+    return max(1, target_px // denom)
+
+
+def build_qr_image(data: str, target_px: int, border: int,
+                   dark: str, light: str) -> Image.Image:
+    """
+    Build a QR image close to `target_px` without resizing the QR grid.
+    Returns an RGBA image. May be slightly smaller than target_px due to integer math.
+    """
+    # First pass: probe to learn module count
+    probe = qrcode.QRCode(
+        version=None,              # automatic sizing
+        error_correction=ERROR_CORRECT_H,
+        box_size=10,               # provisional
+        border=border,
+    )
+    probe.add_data(data)
+    probe.make(fit=True)
+    modules = probe.modules_count
+
+    # Compute a clean integer box size, then render for real
+    box_size = compute_box_size(target_px, modules, border)
+
     qr = qrcode.QRCode(
         version=None,
-        error_correction=ERROR_CORRECT_H, # high error correction for center logo
+        error_correction=ERROR_CORRECT_H,
         box_size=box_size,
         border=border,
     )
     qr.add_data(data)
     qr.make(fit=True)
-    img = qr.make_image(fill_color=fill_color, back_color=back_color).convert("RGBA")
+    img = qr.make_image(fill_color=dark, back_color=light).convert("RGBA")
     return img
 
-def paste_logo(center_img: Image.Image, logo_path: str):
+
+def paste_center_logo(qr_img: Image.Image, logo_path: Optional[str]) -> Image.Image:
+    """
+    Paste a small logo at the center of the QR.
+    - Scales the logo to ~18% of the QR side.
+    - Adds a rounded white backing for contrast.
+    """
     if not logo_path or not os.path.exists(logo_path):
-        return center_img
-    logo = Image.open(logo_path).convert("RGBA")
-    # scale logo to ~18% of QR size
-    qr_w, qr_h = center_img.size
-    target = int(min(qr_w, qr_h) * 0.18)
-    logo.thumbnail((target, target))
-    # optional white circle behind logo for contrast
-    circle = Image.new("RGBA", logo.size, (255,255,255,0))
-    draw = ImageDraw.Draw(circle)
-    r = min(logo.size)//2
-    draw.ellipse([(0,0),(logo.size[0], logo.size[1])], fill=(255,255,255,235))
-    # center positions
-    x = (qr_w - logo.size[0])//2
-    y = (qr_h - logo.size[1])//2
-    # paste circle then logo
-    center_img.alpha_composite(circle, (x, y))
-    center_img.alpha_composite(logo, (x, y))
-    return center_img
+        return qr_img
 
-def compose_layout(qr_img: Image.Image, title="Biox Systems", subtitle="AI QR Code Generator",
-                   footer="Biox Systems • AI QR Code Generator • 1994→2025",
-                   bg="#FFFFFF", margin=80):
-    # Create a tall canvas to host title, subtitle, QR, and footer
     qr_w, qr_h = qr_img.size
-    # Heuristic canvas size
-    canvas_w = qr_w + margin*2
-    canvas_h = qr_h + margin*2 + 260  # extra vertical room for texts
+    max_side = int(min(qr_w, qr_h) * 0.18)
 
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), bg)
+    logo = Image.open(logo_path).convert("RGBA")
+    logo.thumbnail((max_side, max_side), resample=Resampling.LANCZOS)
+
+    # Rounded white backing with slight padding
+    pad = max(4, max(logo.size) // 12)
+    bg_w, bg_h = logo.size[0] + pad * 2, logo.size[1] + pad * 2
+    backing = Image.new("RGBA", (bg_w, bg_h), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(backing)
+    radius = min(bg_w, bg_h) // 5
+    draw.rounded_rectangle([(0, 0), (bg_w - 1, bg_h - 1)], radius=radius, fill=(255, 255, 255, 235))
+    backing.alpha_composite(logo, (pad, pad))
+
+    # Center composite onto QR
+    x = (qr_w - bg_w) // 2
+    y = (qr_h - bg_h) // 2
+    out = qr_img.copy()
+    out.alpha_composite(backing, (x, y))
+    return out
+
+
+# ------------------------------
+# Layout Composition
+# ------------------------------
+
+def text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> Tuple[int, int]:
+    """Return (width, height) using textbbox for reliable metrics."""
+    if not text:
+        return (0, 0)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+
+
+def compose_layout(qr_img: Image.Image, cfg: LayoutConfig) -> Image.Image:
+    """
+    Compose the final PNG with background, title, subtitle, QR, and footer.
+    Empty strings automatically omit that section.
+    """
+    # Fonts
+    title_font = load_font(72, bold=True)
+    subtitle_font = load_font(38, bold=False)
+    footer_font = load_font(28, bold=False)
+
+    qr_w, qr_h = qr_img.size
+    canvas_w = qr_w + cfg.pad * 2
+
+    # Pre-compute estimated height for canvas
+    dummy = Image.new("RGBA", (1, 1), cfg.bg_color)
+    d = ImageDraw.Draw(dummy)
+    est_h = cfg.pad  # top pad baseline
+
+    if cfg.title:
+        est_h += text_size(d, cfg.title, title_font)[1] + cfg.gap_title_sub
+    if cfg.subtitle:
+        est_h += text_size(d, cfg.subtitle, subtitle_font)[1] + cfg.gap_sub_qr
+
+    est_h += qr_h + cfg.gap_qr_footer
+
+    # Estimate 1–2 lines for footer; actual drawing will use same font
+    if cfg.footer:
+        est_h += text_size(d, "Ag", footer_font)[1] * 2 + 12
+
+    est_h += cfg.pad  # bottom pad
+
+    # Create canvas + draw
+    canvas = Image.new("RGBA", (canvas_w, est_h), cfg.bg_color)
     draw = ImageDraw.Draw(canvas)
 
-    # Fonts
-    title_font = load_font(72)
-    subtitle_font = load_font(36)
-    footer_font = load_font(28)
+    y = cfg.pad // 2
 
     # Title
-    title_w, title_h = draw.textbbox((0,0), title, font=title_font)[2:4]
-    title_x = (canvas_w - title_w)//2
-    y_cursor = margin//2
-    draw.text((title_x, y_cursor), title, font=title_font, fill="#000000")
+    if cfg.title:
+        tw, th = text_size(draw, cfg.title, title_font)
+        draw.text(((canvas_w - tw) // 2, y), cfg.title, font=title_font, fill="#000000")
+        y += th + cfg.gap_title_sub
 
     # Subtitle
-    y_cursor += title_h + 8
-    subtitle_w, subtitle_h = draw.textbbox((0,0), subtitle, font=subtitle_font)[2:4]
-    subtitle_x = (canvas_w - subtitle_w)//2
-    draw.text((subtitle_x, y_cursor), subtitle, font=subtitle_font, fill="#333333")
+    if cfg.subtitle:
+        sw, sh = text_size(draw, cfg.subtitle, subtitle_font)
+        draw.text(((canvas_w - sw) // 2, y), cfg.subtitle, font=subtitle_font, fill="#333333")
+        y += sh + cfg.gap_sub_qr
 
     # QR
-    y_cursor += subtitle_h + 24
-    qr_x = (canvas_w - qr_w)//2
-    canvas.alpha_composite(qr_img, (qr_x, y_cursor))
-    y_cursor += qr_h + 24
+    x_qr = (canvas_w - qr_w) // 2
+    canvas.alpha_composite(qr_img, (x_qr, y))
+    y += qr_h + cfg.gap_qr_footer
 
-    # Footer
-    # If footer is long, wrap it
-    wrap_width = max(28, int(canvas_w/28))  # rough
-    lines = textwrap.wrap(footer, width=50)
-    for i, line in enumerate(lines):
-        fw, fh = draw.textbbox((0,0), line, font=footer_font)[2:4]
-        fx = (canvas_w - fw)//2
-        draw.text((fx, y_cursor + i*(fh+4)), line, font=footer_font, fill="#555555")
+    # Footer (simple char-wrap so it's predictable)
+    if cfg.footer:
+        line_width = max(12, cfg.max_footer_width_chars)
+        # Manual wrap without splitting words too aggressively
+        words = cfg.footer.split()
+        lines: List[str] = []
+        current = ""
+        for w in words:
+            test = (current + " " + w).strip()
+            if len(test) <= line_width:
+                current = test
+            else:
+                if current:
+                    lines.append(current)
+                current = w
+        if current:
+            lines.append(current)
+
+        for line in lines:
+            fw, fh = text_size(draw, line, footer_font)
+            draw.text(((canvas_w - fw) // 2, y), line, font=footer_font, fill="#555555")
+            y += fh + 4
 
     return canvas.convert("RGB")
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("url", help="URL to encode")
-    ap.add_argument("--out", default="qr_biox.png", help="output PNG path")
-    ap.add_argument("--title", default="Biox Systems")
-    ap.add_argument("--subtitle", default="AI QR Code Generator")
-    ap.add_argument("--footer", default="Biox Systems • AI QR Code Generator • 1994→2025")
-    ap.add_argument("--logo", default=None, help="optional PNG logo to center")
-    ap.add_argument("--dark", default="#000000")
-    ap.add_argument("--light", default="#FFFFFF")
-    ap.add_argument("--size", type=int, default=1024, help="QR pixel size; final canvas is larger")
+
+# ------------------------------
+# CLI
+# ------------------------------
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Biox Systems — AI QR Code Generator (Optimized)")
+    ap.add_argument("url", help="URL to encode into the QR code")
+    ap.add_argument("--out", default="qr_biox.png", help="Output PNG path (default: qr_biox.png)")
+    ap.add_argument("--title", default="Biox Systems", help="Title text ('' to hide)")
+    ap.add_argument("--subtitle", default="AI QR Code Generator", help="Subtitle text ('' to hide)")
+    ap.add_argument("--footer", default="Biox Systems • AI QR Code Generator • 1994→2025", help="Footer text ('' to hide)")
+    ap.add_argument("--logo", default=None, help="Optional PNG logo to place at QR center")
+    ap.add_argument("--dark", default="#000000", help="Dark (QR) color; hex or name")
+    ap.add_argument("--light", default="#FFFFFF", help="Light (background) color; hex or name")
+    ap.add_argument("--size", type=int, default=1024, help="Target QR pixel size (default 1024)")
+    ap.add_argument("--border", type=int, default=4, help="QR border/quiet zone modules (default 4)")
+    ap.add_argument("--pad", type=int, default=80, help="Outer canvas padding in pixels (default 80)")
     args = ap.parse_args()
 
-    # Determine a box_size that yields about args.size width for QR area
-    # box_size * modules + 2*border*box_size ~= size. We'll approximate with box_size= int(size/45)
-    # but better: try box_size and resize QR to target.
-    base = make_qr(args.url, box_size=20, border=4, fill_color=args.dark, back_color=args.light)
-    # Resize precisely to requested size while keeping sharp edges via nearest neighbor
-    qr_img = base.resize((args.size, args.size), resample=Image.NEAREST)
+    # Normalize colors
+    dark = parse_color(args.dark, "#000000")
+    light = parse_color(args.light, "#FFFFFF")
 
-    if args.logo:
-        qr_img = paste_logo(qr_img, args.logo)
+    # Build QR at target size (no post-resize)
+    qr_img = build_qr_image(args.url, target_px=args.size, border=args.border, dark=dark, light=light)
 
-    final_img = compose_layout(qr_img, title=args.title, subtitle=args.subtitle, footer=args.footer, bg=args.light)
+    # Optional center logo
+    qr_img = paste_center_logo(qr_img, args.logo)
+
+    # Compose final poster
+    cfg = LayoutConfig(
+        title=args.title,
+        subtitle=args.subtitle,
+        footer=args.footer,
+        bg_color=light,
+        dark_color=dark,
+        pad=args.pad,
+    )
+    final_img = compose_layout(qr_img, cfg)
+
+    # Save PNG
     final_img.save(args.out, format="PNG")
-    print(f"Saved: {args.out}")
+    print(f"✅ Saved: {args.out}")
+
 
 if __name__ == "__main__":
     main()
