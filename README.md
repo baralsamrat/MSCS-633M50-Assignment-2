@@ -14,18 +14,19 @@ Saved: qr-image-ucmberland.png
 ✅ Done.
 ```
 
+# Requirments 
 
-#  Create a virtual env named .venv
+##  Create a virtual env named .venv
 python3 -m venv .venv
 
-# Activate it
+## Activate it
 source .venv/bin/activate
 
 # Install packages
 pip install qrcode pillow
 
-# Run your script
+## Run your script
 python /path/to/biox_qr.py "https://your-url.com" --out qr.png
 
-# deactivate
+## deactivate
 deactivate
