@@ -51,6 +51,7 @@ chmod +x run.sh
 
 ./run.sh "https://www.ucumberlands.edu/" --out qr-image-ucmberland.png --title "Univeristy of Cumberlands"
 ```
+![](./src/Screenshot.png)
 
 OUTPUT:
 
